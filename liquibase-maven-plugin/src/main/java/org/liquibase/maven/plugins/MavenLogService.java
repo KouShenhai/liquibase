@@ -1,5 +1,6 @@
 package org.liquibase.maven.plugins;
 
+import liquibase.Scope;
 import liquibase.logging.Logger;
 import liquibase.logging.core.AbstractLogService;
 import liquibase.logging.core.AbstractLogger;
@@ -44,15 +45,20 @@ public class MavenLogService extends AbstractLogService {
             }
 
             if (level.equals(Level.SEVERE)) {
-                mavenLog.error(message, e);
+//                mavenLog.error(message, e);
+                Scope.getCurrentScope().getLog(getClass()).severe(message, e);
             } else if (level.equals(Level.WARNING)) {
-                mavenLog.warn(message, e);
+//                mavenLog.warn(message, e);
+                Scope.getCurrentScope().getLog(getClass()).warning(message, e);
             } else if (level.equals(Level.INFO)) {
-                mavenLog.info(message, e);
+//                mavenLog.info(message, e);
+                Scope.getCurrentScope().getLog(getClass()).info(message, e);
             } else if (level.equals(Level.FINE) || level.equals(Level.FINER) || level.equals(Level.FINEST)) {
-                mavenLog.debug(message, e);
+//                mavenLog.debug(message, e);
+                Scope.getCurrentScope().getLog(getClass()).fine(message, e);
             } else if (level.equals(Level.CONFIG)) {
-                mavenLog.debug(message, e);
+//                mavenLog.debug(message, e);
+                Scope.getCurrentScope().getLog(getClass()).fine(message, e);
             }
         }
     }

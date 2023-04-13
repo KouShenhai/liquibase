@@ -15,6 +15,9 @@ import liquibase.integration.IntegrationDetails;
 import liquibase.integration.commandline.ChangeExecListenerUtils;
 import liquibase.integration.commandline.CommandLineUtils;
 import liquibase.integration.commandline.LiquibaseCommandLineConfiguration;
+import liquibase.logging.LogService;
+import liquibase.logging.core.JavaLogService;
+import liquibase.logging.core.LogServiceFactory;
 import liquibase.resource.DirectoryResourceAccessor;
 import liquibase.resource.ResourceAccessor;
 import liquibase.resource.SearchPathResourceAccessor;
@@ -40,6 +43,9 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.text.MessageFormat;
 import java.util.*;
+import java.util.logging.Handler;
+
+import static liquibase.configuration.LiquibaseConfiguration.REGISTERED_VALUE_PROVIDERS_KEY;
 
 /**
  * A base class for providing Liquibase {@link liquibase.Liquibase} functionality.
@@ -572,6 +578,14 @@ public abstract class AbstractLiquibaseMojo extends AbstractMojo {
     @PropertyElement
     protected String changeExecListenerPropertiesFile;
 
+    /**
+     * Log format
+     *
+     * @parameter property="liquibase.logFormat"
+     */
+    @PropertyElement
+    protected String logFormat;
+
     protected String commandName;
     protected DefaultChangeExecListener defaultChangeExecListener;
 
@@ -605,165 +619,181 @@ public abstract class AbstractLiquibaseMojo extends AbstractMojo {
         }
 
         try {
-            Scope.child(Scope.Attr.logService, new MavenLogService(getLog()), () -> {
+//            Scope.child(LiquibaseCommandLineConfiguration.LOG_FORMAT.getKey(), logFormat, () -> {
+            Map<String, Object> scopeAttrs = new HashMap<>();
+//            scopeAttrs.put(Scope.Attr.logService.name(), new MavenLogService(getLog()));
+            scopeAttrs.put(LiquibaseCommandLineConfiguration.LOG_FORMAT.getKey(), logFormat);
+            Scope.child(scopeAttrs, () -> {
 
-                getLog().info(MavenUtils.LOG_SEPARATOR);
+                LogService newLogService = Scope.child(Collections.singletonMap(REGISTERED_VALUE_PROVIDERS_KEY, true), () -> {
+                    // Get a new log service after registering the value providers, since the log service might need to load parameters using newly registered value providers.
+                    return Scope.getCurrentScope().getSingleton(LogServiceFactory.class).getDefaultLogService();
+                });
 
-                if (server != null) {
-                    AuthenticationInfo info = wagonManager.getAuthenticationInfo(server);
-                    if (info != null) {
-                        username = info.getUserName();
-                        password = info.getPassword();
-                    }
-                }
-
-                processSystemProperties();
-
-                if (!LiquibaseCommandLineConfiguration.SHOULD_RUN.getCurrentValue()) {
-                    getLog().info("Liquibase did not run because " + LiquibaseCommandLineConfiguration.SHOULD_RUN.getKey() + " was set to false");
-                    return;
-                }
-                if (skip) {
-                    getLog().warn("Liquibase skipped due to Maven configuration");
-                    return;
-                }
-
-                ClassLoader mavenClassLoader = getClassLoaderIncludingProjectClasspath();
-                Map<String, Object> scopeValues = new HashMap<>();
-                scopeValues.put(Scope.Attr.resourceAccessor.name(), getResourceAccessor(mavenClassLoader));
-                scopeValues.put(Scope.Attr.classLoader.name(), getClassLoaderIncludingProjectClasspath());
-
-                IntegrationDetails integrationDetails = new IntegrationDetails();
-                integrationDetails.setName("maven");
-
-                final PluginDescriptor pluginDescriptor = (PluginDescriptor) getPluginContext().get("pluginDescriptor");
-                for (MojoDescriptor descriptor : pluginDescriptor.getMojos()) {
-                    if (!descriptor.getImplementationClass().equals(this.getClass())) {
-                        continue;
+                Scope.child(Scope.Attr.logService.name(), newLogService, () -> {
+                    java.util.logging.Logger rootLogger = java.util.logging.Logger.getLogger("");
+                    for (Handler handler : rootLogger.getHandlers()) {
+                        JavaLogService.setFormatterOnHandler(newLogService, handler);
                     }
 
-                    for (Parameter param : descriptor.getParameters()) {
-                        final String name = param.getName();
-                        if (name.equalsIgnoreCase("project") || name.equalsIgnoreCase("systemProperties")) {
+                    getLog().info(MavenUtils.LOG_SEPARATOR);
+
+                    if (server != null) {
+                        AuthenticationInfo info = wagonManager.getAuthenticationInfo(server);
+                        if (info != null) {
+                            username = info.getUserName();
+                            password = info.getPassword();
+                        }
+                    }
+
+                    processSystemProperties();
+
+                    if (!LiquibaseCommandLineConfiguration.SHOULD_RUN.getCurrentValue()) {
+                        getLog().info("Liquibase did not run because " + LiquibaseCommandLineConfiguration.SHOULD_RUN.getKey() + " was set to false");
+                        return;
+                    }
+                    if (skip) {
+                        getLog().warn("Liquibase skipped due to Maven configuration");
+                        return;
+                    }
+
+                    ClassLoader mavenClassLoader = getClassLoaderIncludingProjectClasspath();
+                    Map<String, Object> scopeValues = new HashMap<>();
+                    scopeValues.put(Scope.Attr.resourceAccessor.name(), getResourceAccessor(mavenClassLoader));
+                    scopeValues.put(Scope.Attr.classLoader.name(), getClassLoaderIncludingProjectClasspath());
+
+                    IntegrationDetails integrationDetails = new IntegrationDetails();
+                    integrationDetails.setName("maven");
+
+                    final PluginDescriptor pluginDescriptor = (PluginDescriptor) getPluginContext().get("pluginDescriptor");
+                    for (MojoDescriptor descriptor : pluginDescriptor.getMojos()) {
+                        if (!descriptor.getImplementationClass().equals(this.getClass())) {
                             continue;
                         }
 
-                        final Field field = getField(this.getClass(), name);
-                        if (field == null) {
-                            getLog().debug("Cannot read current maven value for. Will not send the value to hub " + name);
-                        } else {
-                            field.setAccessible(true);
-                            final Object value = field.get(this);
-                            if (value != null) {
-                                try {
-                                    integrationDetails.setParameter("maven__" + param.getName().replaceAll("[${}]", ""), String.valueOf(value));
-                                } catch (Throwable e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                //
-                // Add properties to this top-level scope
-                //
-                scopeValues.put("integrationDetails", integrationDetails);
-                scopeValues.put("liquibase.licenseKey", getLicenseKey());
-                String key = GlobalConfiguration.PRESERVE_SCHEMA_CASE.getKey();
-                scopeValues.put(key, preserveSchemaCase);
-                scopeValues.putAll(getNativeExecutorProperties());
-                Scope.child(scopeValues, () -> {
-
-                    configureFieldsAndValues();
-
-                    if (showBanner) {
-                        getLog().info(CommandLineUtils.getBanner());
-                    }
-
-                    // Displays the settings for the Mojo depending of verbosity mode.
-                    displayMojoSettings();
-
-                    // Check that all the parameters that must be specified have been by the user.
-                    checkRequiredParametersAreSpecified();
-
-                    Database database = null;
-                    try {
-                        if (databaseConnectionRequired()) {
-                            String dbPassword = (emptyPassword || (password == null)) ? "" : password;
-                            String driverPropsFile = (driverPropertiesFile == null) ? null : driverPropertiesFile.getAbsolutePath();
-                            database = CommandLineUtils.createDatabaseObject(mavenClassLoader,
-                                    url,
-                                    username,
-                                    dbPassword,
-                                    driver,
-                                    defaultCatalogName,
-                                    defaultSchemaName,
-                                    outputDefaultCatalog,
-                                    outputDefaultSchema,
-                                    databaseClass,
-                                    driverPropsFile,
-                                    propertyProviderClass,
-                                    changelogCatalogName,
-                                    changelogSchemaName,
-                                    databaseChangeLogTableName,
-                                    databaseChangeLogLockTableName);
-                            liquibase = createLiquibase(database);
-
-                            configureChangeLogProperties();
-
-                            ChangeExecListener listener = ChangeExecListenerUtils.getChangeExecListener(
-                                    liquibase.getDatabase(), liquibase.getResourceAccessor(),
-                                    changeExecListenerClass, changeExecListenerPropertiesFile);
-                            defaultChangeExecListener = new DefaultChangeExecListener(listener);
-                            liquibase.setChangeExecListener(defaultChangeExecListener);
-
-                            getLog().debug("expressionVars = " + expressionVars);
-
-                            if (expressionVars != null) {
-                                for (Map.Entry<Object, Object> var : expressionVars.entrySet()) {
-                                    this.liquibase.setChangeLogParameter(var.getKey().toString(), var.getValue());
-                                }
+                        for (Parameter param : descriptor.getParameters()) {
+                            final String name = param.getName();
+                            if (name.equalsIgnoreCase("project") || name.equalsIgnoreCase("systemProperties")) {
+                                continue;
                             }
 
-                            getLog().debug("expressionVariables = " + expressionVariables);
-                            if (expressionVariables != null) {
-                                for (Map.Entry var : (Set<Map.Entry>) expressionVariables.entrySet()) {
-                                    if (var.getValue() != null) {
-                                        this.liquibase.setChangeLogParameter(var.getKey().toString(), var.getValue());
+                            final Field field = getField(this.getClass(), name);
+                            if (field == null) {
+                                getLog().debug("Cannot read current maven value for. Will not send the value to hub " + name);
+                            } else {
+                                field.setAccessible(true);
+                                final Object value = field.get(this);
+                                if (value != null) {
+                                    try {
+                                        integrationDetails.setParameter("maven__" + param.getName().replaceAll("[${}]", ""), String.valueOf(value));
+                                    } catch (Throwable e) {
+                                        e.printStackTrace();
                                     }
                                 }
                             }
-
-                            if (clearCheckSums) {
-                                getLog().info("Clearing the Liquibase checksums on the database");
-                                liquibase.clearCheckSums();
-                            }
-
-                            getLog().info("Executing on Database: " + url);
-
-                            if (isPromptOnNonLocalDatabase()) {
-                                getLog().info("NOTE: The promptOnLocalDatabase functionality has been removed");
-                            }
                         }
-                        setupBindInfoPackage();
-
-                        //
-                        // Add another scope child with a map so that
-                        // we can set the preserveSchemaCase property,
-                        // which might have been specified in a defaults file
-                        //
-                        Map<String, Object> innerScopeValues = new HashMap<>();
-                        innerScopeValues.put(key, preserveSchemaCase);
-                        Scope.child(innerScopeValues, () -> performLiquibaseTask(liquibase));
-                    } catch (LiquibaseException e) {
-                        cleanup(database);
-                        throw new MojoExecutionException("\nError setting up or running Liquibase:\n" + e.getMessage(), e);
                     }
 
-                    cleanup(database);
-                    getLog().info(MavenUtils.LOG_SEPARATOR);
-                    getLog().info("");
+                    //
+                    // Add properties to this top-level scope
+                    //
+                    scopeValues.put("integrationDetails", integrationDetails);
+                    scopeValues.put("liquibase.licenseKey", getLicenseKey());
+                    String key = GlobalConfiguration.PRESERVE_SCHEMA_CASE.getKey();
+                    scopeValues.put(key, preserveSchemaCase);
+                    scopeValues.putAll(getNativeExecutorProperties());
+                    Scope.child(scopeValues, () -> {
+
+                        configureFieldsAndValues();
+
+                        if (showBanner) {
+                            getLog().info(CommandLineUtils.getBanner());
+                        }
+
+                        // Displays the settings for the Mojo depending of verbosity mode.
+                        displayMojoSettings();
+
+                        // Check that all the parameters that must be specified have been by the user.
+                        checkRequiredParametersAreSpecified();
+
+                        Database database = null;
+                        try {
+                            if (databaseConnectionRequired()) {
+                                String dbPassword = (emptyPassword || (password == null)) ? "" : password;
+                                String driverPropsFile = (driverPropertiesFile == null) ? null : driverPropertiesFile.getAbsolutePath();
+                                database = CommandLineUtils.createDatabaseObject(mavenClassLoader,
+                                        url,
+                                        username,
+                                        dbPassword,
+                                        driver,
+                                        defaultCatalogName,
+                                        defaultSchemaName,
+                                        outputDefaultCatalog,
+                                        outputDefaultSchema,
+                                        databaseClass,
+                                        driverPropsFile,
+                                        propertyProviderClass,
+                                        changelogCatalogName,
+                                        changelogSchemaName,
+                                        databaseChangeLogTableName,
+                                        databaseChangeLogLockTableName);
+                                liquibase = createLiquibase(database);
+
+                                configureChangeLogProperties();
+
+                                ChangeExecListener listener = ChangeExecListenerUtils.getChangeExecListener(
+                                        liquibase.getDatabase(), liquibase.getResourceAccessor(),
+                                        changeExecListenerClass, changeExecListenerPropertiesFile);
+                                defaultChangeExecListener = new DefaultChangeExecListener(listener);
+                                liquibase.setChangeExecListener(defaultChangeExecListener);
+
+                                getLog().debug("expressionVars = " + expressionVars);
+
+                                if (expressionVars != null) {
+                                    for (Map.Entry<Object, Object> var : expressionVars.entrySet()) {
+                                        this.liquibase.setChangeLogParameter(var.getKey().toString(), var.getValue());
+                                    }
+                                }
+
+                                getLog().debug("expressionVariables = " + expressionVariables);
+                                if (expressionVariables != null) {
+                                    for (Map.Entry var : (Set<Map.Entry>) expressionVariables.entrySet()) {
+                                        if (var.getValue() != null) {
+                                            this.liquibase.setChangeLogParameter(var.getKey().toString(), var.getValue());
+                                        }
+                                    }
+                                }
+
+                                if (clearCheckSums) {
+                                    getLog().info("Clearing the Liquibase checksums on the database");
+                                    liquibase.clearCheckSums();
+                                }
+
+                                getLog().info("Executing on Database: " + url);
+
+                                if (isPromptOnNonLocalDatabase()) {
+                                    getLog().info("NOTE: The promptOnLocalDatabase functionality has been removed");
+                                }
+                            }
+                            setupBindInfoPackage();
+
+                            //
+                            // Add another scope child with a map so that
+                            // we can set the preserveSchemaCase property,
+                            // which might have been specified in a defaults file
+                            //
+                            Map<String, Object> innerScopeValues = new HashMap<>();
+                            innerScopeValues.put(key, preserveSchemaCase);
+                            Scope.child(innerScopeValues, () -> performLiquibaseTask(liquibase));
+                        } catch (LiquibaseException e) {
+                            cleanup(database);
+                            throw new MojoExecutionException("\nError setting up or running Liquibase:\n" + e.getMessage(), e);
+                        }
+
+                        cleanup(database);
+                        getLog().info(MavenUtils.LOG_SEPARATOR);
+                        getLog().info("");
+                });
                 });
             });
         } catch (Exception e) {
